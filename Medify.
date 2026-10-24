@@ -1,0 +1,382 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SnapSearch AI</title>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2/dist/mobilenet.min.js"></script>
+
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, Arial, sans-serif;
+  background: #0b1020;
+  color: #eef2ff;
+}
+header {
+  padding: 24px;
+  text-align: center;
+  background: #151d35;
+  border-bottom: 1px solid #34405b;
+}
+h1 { margin: 0; color: #a5b4fc; }
+header p { color: #aab6d0; }
+main { max-width: 760px; margin: auto; padding: 20px; }
+.panel {
+  background: #19243b;
+  padding: 22px;
+  margin-bottom: 20px;
+  border-radius: 18px;
+}
+button, .upload {
+  display: inline-block;
+  padding: 12px 18px;
+  margin: 5px;
+  border: none;
+  border-radius: 10px;
+  background: #818cf8;
+  color: #111827;
+  font-weight: bold;
+  cursor: pointer;
+}
+button:disabled { opacity: .5; cursor: wait; }
+.upload input { display: none; }
+video, #preview {
+  width: 100%;
+  max-height: 380px;
+  object-fit: contain;
+  background: #080d1a;
+  border-radius: 12px;
+  margin-top: 12px;
+}
+textarea {
+  width: 100%;
+  height: 125px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #0d1528;
+  color: white;
+  border: 1px solid #485674;
+}
+.result {
+  padding: 14px;
+  background: #101a30;
+  border-radius: 12px;
+  margin: 10px 0;
+}
+a { color: #a5b4fc; }
+#status { color: #c4b5fd; }
+small { color: #b6c3da; }
+</style>
+</head>
+
+<body>
+<header>
+  <h1>SnapSearch AI</h1>
+  <p>Capture. Recognize. Discover.</p>
+</header>
+
+<main>
+<section class="panel">
+  <h2>1. Capture an Image</h2>
+
+  <button id="openCamera">Open Camera</button>
+  <button id="capture">Capture Photo</button>
+
+  <label class="upload">
+    Upload Image
+    <input id="upload" type="file" accept="image/*">
+  </label>
+
+  <video id="camera" autoplay playsinline hidden></video>
+  <img id="preview" alt="Selected image" hidden>
+  <canvas id="canvas" hidden></canvas>
+
+  <p id="status" role="status">Ready to scan.</p>
+  <button id="analyze">Analyze Image</button>
+</section>
+
+<section class="panel">
+  <h2>2. AI Recognition</h2>
+  <h3>Objects Detected</h3>
+  <div id="objects">No analysis yet.</div>
+
+  <h3>Extracted Text</h3>
+  <textarea id="recognizedText"
+    placeholder="Recognized text will appear here"></textarea>
+
+  <p><small>You can edit the text before searching.</small></p>
+</section>
+
+<section class="panel">
+  <h2>3. Search Results</h2>
+  <button id="search">Search Information</button>
+  <button id="google">Search Google</button>
+  <button id="bing">Search Bing</button>
+  <div id="results"></div>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let stream = null;
+let model = null;
+let imageReady = false;
+let detectedObject = "";
+let busy = false;
+
+function status(message) {
+  $("status").textContent = message;
+}
+
+function stopCamera() {
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  $("camera").srcObject = null;
+  $("camera").hidden = true;
+}
+
+function resetAnalysis() {
+  detectedObject = "";
+  $("objects").textContent = "Not analyzed yet.";
+  $("recognizedText").value = "";
+  $("results").replaceChildren();
+}
+
+$("openCamera").onclick = async () => {
+  if (busy) return;
+  stopCamera();
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },
+      audio: false
+    });
+
+    $("camera").srcObject = stream;
+    $("camera").hidden = false;
+    status("Camera is ready.");
+  } catch (error) {
+    status("Camera error: " + error.message);
+  }
+};
+
+$("capture").onclick = () => {
+  const video = $("camera");
+  if (!stream || !video.videoWidth) {
+    status("Please open the camera first.");
+    return;
+  }
+
+  const canvas = $("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+
+  $("preview").src = canvas.toDataURL("image/jpeg", 0.9);
+  $("preview").hidden = false;
+
+  imageReady = true;
+  resetAnalysis();
+  stopCamera();
+  status("Photo captured. Click Analyze Image.");
+};
+
+$("upload").onchange = async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  if (!file.type.startsWith("image/")) {
+    status("Please select an image file.");
+    return;
+  }
+
+  stopCamera();
+  const url = URL.createObjectURL(file);
+  const img = $("preview");
+
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    imageReady = true;
+    resetAnalysis();
+    status("Image uploaded. Click Analyze Image.");
+  };
+
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    imageReady = false;
+    status("Could not read this image.");
+  };
+
+  imageReady = false;
+  img.hidden = false;
+  img.src = url;
+};
+
+$("analyze").onclick = async () => {
+  if (!imageReady || busy) {
+    status("Select an image first, or wait for analysis.");
+    return;
+  }
+
+  busy = true;
+  $("analyze").disabled = true;
+  const img = $("preview");
+
+  try {
+    status("Loading image recognition model...");
+
+    if (!model) {
+      model = await mobilenet.load();
+    }
+
+    status("Identifying objects...");
+    const predictions = await model.classify(img);
+
+    detectedObject = predictions[0]?.className || "";
+
+    $("objects").replaceChildren();
+
+    predictions.forEach(item => {
+      const p = document.createElement("p");
+      p.textContent =
+        item.className + " — " +
+        Math.round(item.probability * 100) + "% confidence";
+      $("objects").appendChild(p);
+    });
+
+    status("Extracting text with OCR...");
+
+    const result = await Tesseract.recognize(img, "eng");
+    $("recognizedText").value = result.data.text.trim();
+
+    status("Analysis complete! Search for information.");
+  } catch (error) {
+    status("Analysis error: " + error.message);
+  } finally {
+    busy = false;
+    $("analyze").disabled = false;
+  }
+};
+
+function getQuery() {
+  const words = $("recognizedText").value
+    .trim()
+    .replace(/\s+/g, " ");
+
+  // Prioritize readable text; otherwise use the object label.
+  return words
+    ? words.slice(0, 180)
+    : detectedObject;
+}
+
+function addResult(title, description, url) {
+  const card = document.createElement("div");
+  card.className = "result";
+
+  const heading = document.createElement("h3");
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = title;
+
+  heading.appendChild(link);
+
+  const summary = document.createElement("p");
+  summary.textContent = description;
+
+  card.append(heading, summary);
+  $("results").appendChild(card);
+}
+
+$("search").onclick = async () => {
+  const query = getQuery();
+  const results = $("results");
+  results.replaceChildren();
+
+  if (!query) {
+    results.textContent = "Analyze an image or enter text first.";
+    return;
+  }
+
+  results.textContent = "Searching Wikipedia...";
+
+  try {
+    const params = new URLSearchParams({
+      action: "query",
+      list: "search",
+      srsearch: query,
+      srlimit: "6",
+      format: "json",
+      origin: "*"
+    });
+
+    const response = await fetch(
+      "https://en.wikipedia.org/w/api.php?" + params
+    );
+
+    if (!response.ok) throw new Error("Search unavailable");
+
+    const data = await response.json();
+    results.replaceChildren();
+
+    const matches = data.query?.search || [];
+
+    if (!matches.length) {
+      results.textContent =
+        "No Wikipedia matches. Try Google or Bing.";
+      return;
+    }
+
+    matches.forEach(item => {
+      // Remove HTML formatting from Wikipedia snippets safely.
+      const temp = document.createElement("div");
+      temp.innerHTML = item.snippet;
+      const description = temp.textContent || "";
+
+      addResult(
+        item.title,
+        description,
+        "https://en.wikipedia.org/?curid=" + item.pageid
+      );
+    });
+  } catch (error) {
+    results.textContent =
+      "Wikipedia search failed. Try Google or Bing.";
+  }
+};
+
+function externalSearch(engine) {
+  const query = getQuery();
+  if (!query) {
+    status("Analyze an image or enter text first.");
+    return;
+  }
+
+  const base = engine === "google"
+    ? "https://www.google.com/search?q="
+    : "https://www.bing.com/search?q=";
+
+  window.open(
+    base + encodeURIComponent(query),
+    "_blank",
+    "noopener,noreferrer"
+  );
+}
+
+$("google").onclick = () => externalSearch("google");
+$("bing").onclick = () => externalSearch("bing");
+
+window.addEventListener("pagehide", stopCamera);
+</script>
+</body>
+</html>
